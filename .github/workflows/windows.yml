@@ -1,0 +1,80 @@
+name: Windows tests and installer
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    permissions:
+      contents: read
+    env:
+      QT_QPA_PLATFORM: offscreen
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - name: Install project and test dependencies
+        run: python -m pip install -r requirements-build.txt
+      - name: Compile
+        run: python -m compileall -q pdf_tools tests
+      - name: Test backend and real Qt widgets
+        run: python -m pytest -q --junitxml=pytest-windows.xml
+      - name: Build Windows desktop executable
+        shell: pwsh
+        run: |
+          python -m PyInstaller --clean --noconfirm --windowed --onedir --name PDFTools --paths . --icon assets/pdf-tools.ico --version-file packaging/version_info.txt --add-data 'assets/pdf-tools.ico;assets' pdf_tools/__main__.py
+          if (!(Test-Path dist/PDFTools/PDFTools.exe)) { throw 'EXE missing' }
+      - name: Windows EXE launch smoke test
+        shell: pwsh
+        run: |
+          $proc = Start-Process -FilePath (Resolve-Path 'dist/PDFTools/PDFTools.exe') -PassThru
+          Start-Sleep -Seconds 8
+          if ($proc.HasExited) { throw "EXE exited prematurely with code $($proc.ExitCode)" }
+          Stop-Process -Id $proc.Id
+      - name: Install Inno Setup
+        shell: pwsh
+        run: choco install innosetup -y --no-progress
+      - name: Build setup installer
+        shell: pwsh
+        run: .\scripts\build_installer.ps1
+      - name: Install, launch and uninstall Setup (per-user)
+        shell: pwsh
+        run: |
+          $setup = (Resolve-Path 'dist/installer/PDFTools-Setup.exe').Path
+          $install = Start-Process -FilePath $setup -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART' -Wait -PassThru
+          if ($install.ExitCode -ne 0) { throw "Installer exit code $($install.ExitCode)" }
+          $app = Join-Path $env:LOCALAPPDATA 'Programs/PDFTools/PDFTools.exe'
+          if (!(Test-Path $app)) { throw 'Installed EXE not found' }
+          $proc = Start-Process -FilePath $app -PassThru
+          Start-Sleep -Seconds 7
+          if ($proc.HasExited) { throw "Installed app exited prematurely with code $($proc.ExitCode)" }
+          Stop-Process -Id $proc.Id
+          $uninstaller = Join-Path $env:LOCALAPPDATA 'Programs/PDFTools/unins000.exe'
+          if (!(Test-Path $uninstaller)) { throw 'Uninstaller not found' }
+          $uninstall = Start-Process -FilePath $uninstaller -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART' -Wait -PassThru
+          if ($uninstall.ExitCode -ne 0) { throw "Uninstall exit code $($uninstall.ExitCode)" }
+          if (Test-Path $app) { throw 'Application files remain after uninstall' }
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: PDFTools-Windows-Test-Results
+          path: pytest-windows.xml
+          if-no-files-found: warn
+      - name: Upload application folder
+        uses: actions/upload-artifact@v4
+        with:
+          name: PDFTools-Windows-portable
+          path: dist/PDFTools/
+          if-no-files-found: error
+      - name: Upload Setup installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: PDFTools-Windows-Setup
+          path: dist/installer/PDFTools-Setup.exe
+          if-no-files-found: error
